@@ -6,7 +6,7 @@ import sttp.tapir.capabilities.NoStreams
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.RequestResult
 import sttp.tapir.server.interceptor.reject.RejectInterceptor
-import sttp.tapir.server.interpreter.{BodyListener, FilterServerEndpoints, ServerInterpreter}
+import sttp.tapir.server.interpreter.{BodyListener, FilterServerEndpoints, ServerInterpreter, ThirdPartyInterpreter}
 import sttp.tapir.server.jdkhttp.internal._
 
 import scala.jdk.CollectionConverters._
@@ -35,46 +35,60 @@ trait JdkHttpServerInterpreter {
       JdkHttpServerInterpreter.setRequestHandled(exchange, v = false)
 
       val req = JdkHttpServerRequest(exchange)
-      serverInterpreter(req) match {
-        case RequestResult.Response(response) =>
-          try {
-            exchange.getResponseHeaders.putAll(
-              response.headers.groupBy(_.name).view.mapValues(_.map(_.value).asJava).toMap.asJava
-            )
+      sendResponse(exchange, serverInterpreter(req))
+    }
+  }
 
-            val contentLengthFromHeader = response.headers
-              .find {
-                case Header(HeaderNames.ContentLength, _) => true
-                case _                                    => false
-              }
-              .map(_.value.toLong)
-              .getOrElse(0L)
+  def toHandler(thirdPartyInterpreter: ThirdPartyInterpreter[Id]): HttpHandler = {
+    val requestBody = new JdkHttpRequestBody(jdkHttpServerOptions.createFile, jdkHttpServerOptions.multipartFileThresholdBytes)
+    val responseBody = new JdkHttpToResponseBody
+    (exchange: HttpExchange) => {
+      JdkHttpServerInterpreter.setRequestHandled(exchange, v = false)
+      val req = JdkHttpServerRequest(exchange)
+      sendResponse(exchange, thirdPartyInterpreter.run(req, requestBody, responseBody))
+    }
+  }
 
-            response.body match {
-              case Some((is, maybeContentLength)) =>
-                val contentLength = maybeContentLength.getOrElse(contentLengthFromHeader)
-                exchange.sendResponseHeaders(response.code.code, contentLength)
-                val os = exchange.getResponseBody
-                try is.transferTo(os)
-                finally {
-                  is.close()
-                  os.close()
-                }
-              case None =>
-                exchange.sendResponseHeaders(response.code.code, contentLengthFromHeader)
+  private def sendResponse(exchange: HttpExchange, response: RequestResult[JdkHttpResponseBody]): Unit = {
+    response match {
+      case RequestResult.Response(response) =>
+        try {
+          exchange.getResponseHeaders.putAll(
+            response.headers.groupBy(_.name).view.mapValues(_.map(_.value).asJava).toMap.asJava
+          )
+
+          val contentLengthFromHeader = response.headers
+            .find {
+              case Header(HeaderNames.ContentLength, _) => true
+              case _                                    => false
             }
-          } finally {
-            JdkHttpServerInterpreter.setRequestHandled(exchange, v = true)
-            exchange.close()
-          }
+            .map(_.value.toLong)
+            .getOrElse(0L)
 
-        case RequestResult.Failure(_) =>
-          if (jdkHttpServerOptions.send404WhenRequestNotHandled) {
-            JdkHttpServerInterpreter.setRequestHandled(exchange, v = true)
-            try exchange.sendResponseHeaders(404, -1)
-            finally exchange.close()
+          response.body match {
+            case Some((is, maybeContentLength)) =>
+              val contentLength = maybeContentLength.getOrElse(contentLengthFromHeader)
+              exchange.sendResponseHeaders(response.code.code, contentLength)
+              val os = exchange.getResponseBody
+              try is.transferTo(os)
+              finally {
+                is.close()
+                os.close()
+              }
+            case None =>
+              exchange.sendResponseHeaders(response.code.code, contentLengthFromHeader)
           }
-      }
+        } finally {
+          JdkHttpServerInterpreter.setRequestHandled(exchange, v = true)
+          exchange.close()
+        }
+
+      case RequestResult.Failure(_) =>
+        if (jdkHttpServerOptions.send404WhenRequestNotHandled) {
+          JdkHttpServerInterpreter.setRequestHandled(exchange, v = true)
+          try exchange.sendResponseHeaders(404, -1)
+          finally exchange.close()
+        }
     }
   }
 }
