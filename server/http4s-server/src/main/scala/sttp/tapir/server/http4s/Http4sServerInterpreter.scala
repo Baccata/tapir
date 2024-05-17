@@ -14,7 +14,7 @@ import sttp.tapir.integ.cats.effect.CatsMonadError
 import sttp.tapir.server.ServerEndpoint
 import sttp.tapir.server.interceptor.RequestResult
 import sttp.tapir.server.interceptor.reject.RejectInterceptor
-import sttp.tapir.server.interpreter.{BodyListener, FilterServerEndpoints, ServerInterpreter}
+import sttp.tapir.server.interpreter.{BodyListener, FilterServerEndpoints, ServerInterpreter, ThirdPartyInterpreter}
 import sttp.tapir.server.model.ServerResponse
 
 import scala.reflect.ClassTag
@@ -31,8 +31,6 @@ trait Http4sServerInterpreter[F[_]] {
 
   def http4sServerOptions: Http4sServerOptions[F] = Http4sServerOptions.default[F]
 
-  //
-
   def toRoutes(se: ServerEndpoint[Fs2Streams[F], F]): HttpRoutes[F] =
     toRoutes(List(se))
 
@@ -45,6 +43,18 @@ trait Http4sServerInterpreter[F[_]] {
   def toWebSocketRoutes(
       serverEndpoints: List[ServerEndpoint[Fs2Streams[F] with WebSockets, F]]
   ): WebSocketBuilder2[F] => HttpRoutes[F] = wsb => toRoutes(serverEndpoints, Some(wsb))
+
+  def toRoutes(interpreter: ThirdPartyInterpreter[F]): HttpRoutes[F] = {
+    val fromRequestBody = new Http4sRequestBody[F](http4sServerOptions)
+    val toResponseBody = new Http4sToResponseBody[F](http4sServerOptions)
+    Kleisli { (req: Request[F]) =>
+      val serverRequest = Http4sServerRequest(req)
+      OptionT(interpreter.run(serverRequest, fromRequestBody, toResponseBody).flatMap {
+        case _: RequestResult.Failure         => none.pure[F]
+        case RequestResult.Response(response) => serverResponseToHttp4s(response, None).map(_.some)
+      })
+    }
+  }
 
   def toContextRoutes[T: ClassTag](se: ServerEndpoint[Fs2Streams[F] with Context[T], F]): ContextRoutes[T, F] =
     toContextRoutes(contextAttributeKey[T], List(se), None)
